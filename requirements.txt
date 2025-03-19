@@ -1,0 +1,15 @@
+python-dotenv
+fastapi
+uvicorn
+sqlmodel
+pydantic
+livekit-agents
+livekit-plugins-openai
+livekit-api
+livekit-plugins-deepgram
+livekit-plugins-cartesia
+livekit-plugins-silero
+asyncio
+
+
+

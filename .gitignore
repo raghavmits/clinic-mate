@@ -1,0 +1,11 @@
+#Ignore all files in the .env directory
+.env
+
+#Ignore the virtual environment
+clinic-env/*
+clinic-env
+
+#Ignore the __pycache__ directory
+__pycache__/
+
+#Ignore the .DS_Store file
