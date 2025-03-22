@@ -1,140 +1,95 @@
 import asyncio
-import os
-import json
 from datetime import datetime
 
-from livekit import rtc
-from livekit.agents import (
-    JobContext, 
-    WorkerOptions, 
-    cli, 
-    JobProcess
-)
-from livekit.agents.llm import (
-    ChatContext,
-    ChatMessage,
-)
-from livekit.agents.pipeline import VoicePipelineAgent
-from livekit.agents.log import logger
-from livekit.plugins import deepgram, silero, cartesia, openai
-from typing import Dict, Any
-from prompts import CHAT_MSG_INSTRUCTIONS
+from aiofile import async_open as open
 from dotenv import load_dotenv
+from livekit.agents import AutoSubscribe, JobContext, WorkerOptions, cli, llm
+from livekit.agents.pipeline import VoicePipelineAgent
+from livekit.plugins import deepgram, openai, silero, elevenlabs
+
+import logging
+from prompts import CHAT_INSTRUCTIONS, INITIAL_MESSAGE
+from api import ClinicMateFunctions
+
+logger = logging.getLogger("hospital-registration")
+logger.setLevel(logging.INFO)
 
 load_dotenv()
 
-
-def prewarm(proc: JobProcess):
-    # preload models when process starts to speed up first interaction
-    proc.userdata["vad"] = silero.VAD.load()
-
-
 async def entrypoint(ctx: JobContext):
-    # Create a system prompt that guides the assistant to collect name and phone number
-    initial_ctx = ChatContext(
-        messages=[
-            ChatMessage(
-                role="system",
-                content=CHAT_MSG_INSTRUCTIONS
-            )
-        ]
+    """Main entry point for the hospital registration agent"""
+    
+    # Create our function context for patient registration
+    fnc_ctx = ClinicMateFunctions()
+    
+    # Initialize chat context with system instructions
+    initial_ctx = llm.ChatContext().append(
+        role="system",
+        text=CHAT_INSTRUCTIONS
     )
 
-    # Create a dictionary to store collected information
-    user_info: Dict[str, Any] = {
-        "name": None,
-        "phone": None,
-        "timestamp": None
-    }
-
-    # Create the voice pipeline agent with fixed voice settings
+    # Connect to the room and wait for a participant
+    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    participant = await ctx.wait_for_participant()
+    
+    # Create the voice pipeline agent
     agent = VoicePipelineAgent(
-        vad=ctx.proc.userdata["vad"],
+        vad=silero.VAD.load(),
         stt=deepgram.STT(),
-        llm=openai.LLM(model="gpt-4o-mini"),
-        tts=cartesia.TTS(model="sonic-2"),  # Fixed voice model
+        llm=openai.LLM(),
+        tts=elevenlabs.TTS(),
+        fnc_ctx=fnc_ctx,
         chat_ctx=initial_ctx,
     )
+    
+    # Start the assistant
+    agent.start(ctx.room, participant)
 
-    is_user_speaking = False
-    is_agent_speaking = False
+    # Set up logging of the conversation
+    log_queue = asyncio.Queue()
 
-    # Connect event handlers for speaking states
-    @agent.on("agent_started_speaking")
-    def agent_started_speaking():
-        nonlocal is_agent_speaking
-        is_agent_speaking = True
+    @agent.on("user_speech_committed")
+    def on_user_speech_committed(msg: llm.ChatMessage):
+        # Log user messages
+        if isinstance(msg.content, list):
+            msg.content = "\n".join(
+                "[image]" if isinstance(x, llm.ChatImage) else x for x in msg
+            )
+        log_queue.put_nowait(f"[{datetime.now()}] USER:\n{msg.content}\n\n")
 
-    @agent.on("agent_stopped_speaking")
-    def agent_stopped_speaking():
-        nonlocal is_agent_speaking
-        is_agent_speaking = False
-
-    @agent.on("user_started_speaking")
-    def user_started_speaking():
-        nonlocal is_user_speaking
-        is_user_speaking = True
-
-    @agent.on("user_stopped_speaking")
-    def user_stopped_speaking():
-        nonlocal is_user_speaking
-        is_user_speaking = False
-
-    # Set up a message handler to extract and log information
-    @agent.on("message_received")
-    def on_message_received(message: ChatMessage):
-        if message.role != "assistant":
-            return
+    @agent.on("agent_speech_committed")
+    def on_agent_speech_committed(msg: llm.ChatMessage):
+        # Log agent messages
+        log_queue.put_nowait(f"[{datetime.now()}] AGENT:\n{msg.content}\n\n")
         
-        # Check if we need to update user info based on conversation context
-        # This is a simple implementation and might need more sophisticated NLP in a real application
-        if user_info["name"] is None and "name" in agent.chat_ctx.messages[-2].content.lower():
-            # Extract potential name from the user's last message
-            user_info["name"] = agent.chat_ctx.messages[-2].content
-            logger.info(f"Collected name: {user_info['name']}")
-        
-        elif user_info["name"] is not None and user_info["phone"] is None and "phone" in agent.chat_ctx.messages[-2].content.lower():
-            # Extract potential phone number from the user's last message
-            user_info["phone"] = agent.chat_ctx.messages[-2].content
-            user_info["timestamp"] = datetime.now().isoformat()
-            logger.info(f"Collected phone: {user_info['phone']}")
-            
-            # Log the complete information once we have both
-            if user_info["name"] and user_info["phone"]:
-                log_user_information(user_info)
+        # Check for registration confirmation in the message
+        if fnc_ctx.patient_name and fnc_ctx.date_of_birth and not fnc_ctx.is_registered:
+            if "registered" in msg.content.lower() and "successfully" in msg.content.lower():
+                # Call the register function when the agent confirms registration
+                asyncio.create_task(
+                    fnc_ctx.register_patient(fnc_ctx.patient_name, fnc_ctx.date_of_birth)
+                )
 
-    await ctx.connect()
-    
-    # Start the agent and begin the conversation
-    agent.start(ctx.room)
-    await agent.say("Hello! I'm calling to collect some information. Could you please tell me your name?", allow_interruptions=True)
+    # Set up file writing for conversation logs
+    async def write_transcription():
+        async with open("patient_registration.log", "w") as f:
+            while True:
+                msg = await log_queue.get()
+                if msg is None:
+                    break
+                await f.write(msg)
 
+    write_task = asyncio.create_task(write_transcription())
 
-def log_user_information(user_info: Dict[str, Any]):
-    """Log the collected user information to a file."""
-    log_dir = "user_logs"
-    os.makedirs(log_dir, exist_ok=True)
-    
-    log_file = os.path.join(log_dir, f"user_info_{datetime.now().strftime('%Y%m%d')}.json")
-    
-    # Read existing logs if file exists
-    existing_logs = []
-    if os.path.exists(log_file):
-        with open(log_file, 'r') as f:
-            try:
-                existing_logs = json.load(f)
-            except json.JSONDecodeError:
-                existing_logs = []
-    
-    # Append new log
-    existing_logs.append(user_info)
-    
-    # Write updated logs
-    with open(log_file, 'w') as f:
-        json.dump(existing_logs, f, indent=2)
-    
-    logger.info(f"User information logged successfully: {user_info['name']}, {user_info['phone']}")
+    async def finish_queue():
+        log_queue.put_nowait(None)
+        await write_task
+
+    ctx.add_shutdown_callback(finish_queue)
+
+    # Start the conversation with the initial greeting
+    await agent.say(INITIAL_MESSAGE, allow_interruptions=True)
 
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))

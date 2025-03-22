@@ -3,12 +3,17 @@ fastapi
 uvicorn
 sqlmodel
 pydantic
+aiofile
+twilio
+websocket-client
+livekit
 livekit-agents
-livekit-plugins-openai
 livekit-api
+livekit-plugins-openai
 livekit-plugins-deepgram
 livekit-plugins-cartesia
 livekit-plugins-silero
+livekit-plugins-elevenlabs
 asyncio
 
 

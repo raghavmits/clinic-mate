@@ -8,4 +8,7 @@ clinic-env
 #Ignore the __pycache__ directory
 __pycache__/
 
-#Ignore the .DS_Store file
+# Ignore scripts
+scripts/*
+scripts
+

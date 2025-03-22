@@ -1,0 +1,27 @@
+[2025-03-21 20:26:54.070277] AGENT:
+Hello, I'm Alice, the assistant for Berkeley Medical Center. I'll help you register as a patient. Could you please tell me your name?
+
+[2025-03-21 20:27:00.810816] USER:
+My name is Raghav.
+
+[2025-03-21 20:27:04.549911] AGENT:
+Thank you, Raghav. Could you please provide your date of birth in MM/DD/YYYY format?
+
+[2025-03-21 20:27:16.469936] USER:
+Zero four one nine two zero one one.
+
+[2025-03-21 20:27:20.654208] AGENT:
+Thank you for the information. To confirm, your date of birth is 04/19/2011. Is that correct?
+
+[2025-03-21 20:27:25.008958] USER:
+Yes. That's correct.
+
+[2025-03-21 20:27:33.232588] AGENT:
+Great, Raghav! You're successfully registered as a patient with us. If you have any other questions or need further assistance, feel free to ask.
+
+[2025-03-21 20:27:39.780954] USER:
+Um, thank you.
+
+[2025-03-21 20:27:43.548141] AGENT:
+You're welcome! If there's anything else you need, don't hesitate to let me know. Have a great day!
+
