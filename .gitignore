@@ -12,3 +12,13 @@ __pycache__/
 scripts/*
 scripts
 
+#Ignore patient_registration.log
+patient_registration*
+
+#Ignore the database
+clinic_mate.db
+
+#Ignore the call_summaries
+call_summary*
+
+
