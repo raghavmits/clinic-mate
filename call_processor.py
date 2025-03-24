@@ -4,17 +4,21 @@ Functions for handling call termination and post-call processing.
 
 import logging
 import asyncio
-from datetime import datetime, date
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
-import re
 import os
-import smtplib
-import ssl
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 import database  # Import the database module
 from api import ClinicMateFunctions  # Import for type hints
+from utils import (
+    generate_call_summary,
+    create_email_message,
+    generate_html_email,
+    get_email_credentials,
+    send_email_sync,
+    extract_data_from_conversation,
+    parse_date_of_birth
+)
 
 logger = logging.getLogger("call-processor")
 logger.setLevel(logging.INFO)
@@ -108,19 +112,9 @@ async def save_to_database(patient_data: Dict[str, Any]) -> Optional[database.Pa
             logger.warning(f"Cannot save to database: Missing name or date of birth")
             return None
             
-        # Simplified date parsing - try common formats
-        try:
-            try:
-                # MM/DD/YYYY format
-                dob = datetime.strptime(dob_str, '%m/%d/%Y').date()
-            except ValueError:
-                try:
-                    # Try YYYY-MM-DD format
-                    dob = datetime.strptime(dob_str, '%Y-%m-%d').date()
-                except ValueError:
-                    # Try descriptive format (e.g., "January 15, 1980")
-                    dob = datetime.strptime(dob_str, '%B %d, %Y').date()
-        except Exception:
+        # Parse the date of birth using our utility function
+        dob = parse_date_of_birth(dob_str)
+        if not dob:
             logger.error(f"Could not parse date of birth: {dob_str}")
             # Use current date as fallback
             dob = datetime.now().date()
@@ -173,213 +167,6 @@ async def save_patient_data(patient_data: Dict[str, Any]) -> bool:
         logger.error(f"Error saving patient data: {str(e)}")
         return False
 
-def generate_call_summary(patient_data: Dict[str, Any]) -> str:
-    """
-    Generate a readable call summary from patient data
-    
-    Args:
-        patient_data: Dictionary containing patient information
-        
-    Returns:
-        Formatted call summary as a string
-    """
-    # Get patient name, with fallback to "Unknown" if not present
-    patient_name = patient_data.get('patient_name', 'Unknown')
-    
-    # Start building the summary
-    summary = "Thank you for calling Assort Medical Clinic. Here is a summary of your call: \n\n"
-    
-    # Check if we have critical patient information
-    has_name = patient_data.get('patient_name') and patient_data['patient_name'].strip() != ""
-    has_dob = patient_data.get('date_of_birth') and patient_data['date_of_birth'].strip() != ""
-    
-    # Add warning if critical information is missing
-    if not has_name or not has_dob:
-        summary += "⚠️ **WARNING: INCOMPLETE PATIENT RECORD** ⚠️\n"
-        summary += "The following critical information is missing:\n"
-        if not has_name:
-            summary += "- Patient name\n"
-        if not has_dob:
-            summary += "- Date of birth\n"
-        summary += "\nThis patient record may not have been saved to the database properly.\n\n"
-    
-    # Add patient information section
-    summary += "PATIENT INFORMATION\n"
-    summary += f"- Name: {patient_name}\n"
-    
-    if has_dob:
-        summary += f"- Date of Birth: {patient_data.get('date_of_birth', 'Not provided')}\n"
-    else:
-        summary += f"- Date of Birth: Not provided\n"
-    
-    if patient_data.get('phone_number'):
-        summary += f"- Phone: {patient_data['phone_number']}\n"
-    
-    if patient_data.get('email'):
-        summary += f"- Email: {patient_data['email']}\n"
-    
-    if patient_data.get('address'):
-        summary += f"- Address: {patient_data['address']}\n"
-    
-    # Add database information if available
-    if patient_data.get('patient_id'):
-        summary += f"- Patient ID: {patient_data['patient_id']} (Successfully saved to database)\n"
-    else:
-        if has_name and has_dob:
-            summary += "- Database Status: Not saved to database (Error occurred)\n"
-        else:
-            summary += "- Database Status: Not saved to database (Missing required information)\n"
-    
-    # Add insurance section if available
-    if any(k in patient_data for k in ['insurance_provider', 'insurance_id', 'has_referral']):
-        summary += "\nINSURANCE INFORMATION\n"
-        
-        if patient_data.get('insurance_provider'):
-            summary += f"- Provider: {patient_data['insurance_provider']}\n"
-        
-        if patient_data.get('insurance_id'):
-            summary += f"- Insurance ID: {patient_data['insurance_id']}\n"
-        
-        if 'has_referral' in patient_data:
-            referral_status = "Yes" if patient_data['has_referral'] else "No"
-            summary += f"- Has Referral: {referral_status}\n"
-            
-            if patient_data.get('has_referral') and patient_data.get('referred_physician'):
-                summary += f"- Referred By: {patient_data['referred_physician']}\n"
-    
-    # Add medical complaint if available
-    if patient_data.get('medical_complaint'):
-        summary += "\nMEDICAL INFORMATION\n"
-        summary += f"- Complaint: {patient_data['medical_complaint']}\n"
-    
-    # Add appointment information if available
-    # Check both wants_appointment and appointment_details since sometimes appointment details
-    # exist even when wants_appointment is not set to True
-    has_appointment_info = (patient_data.get('wants_appointment') or 
-                           patient_data.get('appointment_details') or 
-                           patient_data.get('doctor_preference') or
-                           patient_data.get('specialty_preference'))
-    
-    if has_appointment_info:
-        summary += "\nAPPOINTMENT INFORMATION\n"
-        
-        # Case 1: We have a confirmed appointment with details and ID
-        if patient_data.get('appointment_id') and patient_data.get('appointment_details'):
-            details = patient_data['appointment_details']
-            summary += f"- Status: Appointment successfully booked\n"
-            summary += f"- Appointment ID: {patient_data['appointment_id']}\n"
-            
-            if isinstance(details, dict):
-                # Try different possible date/time formats based on actual data structure
-                date_time = None
-                if details.get('date_time'):
-                    date_time = details['date_time']
-                elif details.get('date') and details.get('time'):
-                    date_time = f"{details['date']} at {details['time']}"
-                
-                if date_time:
-                    summary += f"- Date & Time: {date_time}\n"
-                
-                # Doctor information with different possible structures
-                doctor_name = None
-                doctor_specialty = None
-                
-                # Handle doctor information in different possible formats
-                if details.get('doctor'):
-                    doctor_dict = details['doctor']
-                    if isinstance(doctor_dict, dict):
-                        doctor_name = doctor_dict.get('name')
-                        doctor_specialty = doctor_dict.get('specialty')
-                elif details.get('doctor_name'):
-                    doctor_name = details['doctor_name']
-                
-                if doctor_name:
-                    summary += f"- Doctor: {doctor_name}\n"
-                
-                # Specialty information
-                if doctor_specialty:
-                    summary += f"- Specialty: {doctor_specialty}\n"
-                elif details.get('specialty'):
-                    summary += f"- Specialty: {details['specialty']}\n"
-                
-                # Location information
-                if details.get('location'):
-                    summary += f"- Location: {details['location']}\n"
-                else:
-                    summary += f"- Location: Assort Medical Clinic Main Campus\n"
-                
-                # Duration information if available
-                if details.get('duration_minutes'):
-                    summary += f"- Duration: {details['duration_minutes']} minutes\n"
-            else:
-                # If appointment_details is not a dictionary, just include it as is
-                summary += f"- Details: {details}\n"
-        
-        # Case 2: Appointment is pending/requested but not confirmed
-        elif patient_data.get('appointment_details') and isinstance(patient_data['appointment_details'], dict):
-            details = patient_data['appointment_details']
-            status = details.get('status', 'pending')
-            summary += f"- Status: Appointment {status}\n"
-            
-            # Try to get doctor information
-            doctor_name = None
-            doctor_specialty = None
-            
-            if details.get('doctor') and isinstance(details['doctor'], dict):
-                doctor_dict = details['doctor']
-                doctor_name = doctor_dict.get('name')
-                doctor_specialty = doctor_dict.get('specialty')
-            
-            # Get date and time
-            date_time = details.get('date_time')
-            if date_time:
-                summary += f"- Requested Date & Time: {date_time}\n"
-            
-            if doctor_name:
-                summary += f"- Requested Doctor: {doctor_name}\n"
-            
-            if doctor_specialty:
-                summary += f"- Specialty: {doctor_specialty}\n"
-            
-            # Add error information if present
-            if details.get('error'):
-                summary += f"- Note: Appointment scheduling needs follow-up: {details['error']}\n"
-            
-            summary += "- The clinic will contact you to confirm your appointment details.\n"
-        
-        # Case 3: Patient indicated preferences but no appointment was created
-        elif patient_data.get('specialty_preference') or patient_data.get('doctor_preference'):
-            summary += "- Status: Appointment requested but not confirmed\n"
-            
-            if patient_data.get('specialty_preference'):
-                summary += f"- Preferred Specialty: {patient_data['specialty_preference']}\n"
-            
-            if patient_data.get('doctor_preference'):
-                summary += f"- Preferred Doctor: {patient_data['doctor_preference']}\n"
-            
-            summary += "- The clinic will contact you to schedule your appointment.\n"
-        
-        # Case 4: Basic interest in appointments but no details
-        else:
-            summary += "- Status: Patient expressed interest in appointment, but no details provided\n"
-            summary += "- Please call back to schedule a specific appointment.\n"
-        
-        # Add reminder
-        summary += "- Please arrive 15 minutes early and bring your insurance card and ID.\n"
-    
-    # Add registration status
-    summary += "\nREGISTRATION STATUS\n"
-    if patient_data.get('is_registered'):
-        summary += "- Status: Completed\n"
-    else:
-        stage = patient_data.get('registration_stage', 'Not started')
-        summary += f"- Status: In progress ({stage})\n"
-    
-    # Add timestamp
-    summary += f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    
-    return summary
-
 async def send_confirmation_email(patient_data: Dict[str, Any]) -> bool:
     """
     Send a confirmation email to the patient with their call summary.
@@ -393,57 +180,25 @@ async def send_confirmation_email(patient_data: Dict[str, Any]) -> bool:
     try:
         # Get patient information
         patient_name = patient_data.get('patient_name', 'Unknown')
-        sender_email = os.environ.get("EMAIL_SENDER")
-        recipient_email = os.environ.get("EMAIL_RECIPIENT")
         
+        # Get email credentials from environment
+        sender_email, password = get_email_credentials()
+        # recipient_email = patient_data.get('email', os.environ.get("EMAIL_RECIPIENT"))
+        recipient_email = os.environ.get("EMAIL_RECIPIENT")
+
         if not recipient_email:
             logger.warning(f"No email provided for {patient_name}, using default recipient")
-        
-        # Email configuration
-        sender_email = os.environ.get("EMAIL_SENDER")
-        password = os.environ.get("EMAIL_PASSWORD")  # Get from environment variable for security
             
         # If no password is set in environment variables, log an error
-        if not password:
-            logger.error("Email password not set in environment variables (EMAIL_PASSWORD)")
+        if not sender_email or not password:
+            logger.error("Email credentials not set in environment variables")
             return False
-            
-        # Create the email message
-        message = MIMEMultipart("alternative")
-        message["Subject"] = f"Clinic-Mate: Appointment Summary for {patient_name}"
-        message["From"] = sender_email
-        message["To"] = recipient_email
                     
         # Generate the call summary
         call_summary = generate_call_summary(patient_data)
                     
-        # Create the HTML version of the email
-        html_content = f"""
-        <html>
-        <head>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                h1 {{ color: #0066cc; }}
-                h2 {{ color: #0066cc; margin-top: 20px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
-                .info-section {{ margin-bottom: 20px; }}
-                .footer {{ margin-top: 30px; font-size: 12px; color: #888; text-align: center; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>Assort Medical Clinic Call Summary</h1>
-                <div class="info-section">
-                    <pre>{call_summary}</pre>
-                </div>
-                <div class="footer">
-                    <p>This is an automated message from Clinic-Mate. Please do not reply to this email.</p>
-                    <p>© {datetime.now().year} Assort Clinic. All rights reserved.</p>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
+        # Create the HTML content
+        html_content = generate_html_email(call_summary, "Assort Medical Clinic Call Summary")
         
         # Create plain text version as a fallback
         text_content = f"""
@@ -454,21 +209,31 @@ async def send_confirmation_email(patient_data: Dict[str, Any]) -> bool:
         This is an automated message from Clinic-Mate. Please do not reply to this email.
         © {datetime.now().year} Assort Clinic. All rights reserved.
         """
-                
-        # Attach parts to the message
-        part1 = MIMEText(text_content, "plain")
-        part2 = MIMEText(html_content, "html")
-        message.attach(part1)
-        message.attach(part2)
+        
+        # Create the email message
+        message = create_email_message(
+            subject=f"Clinic-Mate: Appointment Summary for {patient_name}",
+            text_content=text_content,
+            html_content=html_content,
+            sender_email=sender_email,
+            recipient_email=recipient_email
+        )
         
         # Connect to the SMTP server and send the email
         logger.info(f"Attempting to send email to: {recipient_email}")
             
-        # Create a secure SSL context
-        context = ssl.create_default_context()
-                
         # Use asyncio to run the blocking SMTP operations in a thread pool
-        await asyncio.to_thread(_send_email_sync, sender_email, password, recipient_email, message.as_string())
+        success = await asyncio.to_thread(
+            send_email_sync,
+            sender_email,
+            password,
+            recipient_email,
+            message.as_string()
+        )
+        
+        if not success:
+            logger.error("Failed to send email")
+            return False
                     
         # Log success
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -479,7 +244,7 @@ async def send_confirmation_email(patient_data: Dict[str, Any]) -> bool:
         patient_name_safe = patient_name.replace(" ", "_")
         filename = f"call_summary_{patient_name_safe}_{timestamp_file}.txt"
         
-        # Use aiofile to write the file asynchronously
+        # Write the file
         with open(filename, "w") as f:
             f.write(call_summary)
         
@@ -490,65 +255,6 @@ async def send_confirmation_email(patient_data: Dict[str, Any]) -> bool:
         logger.error(f"Error sending confirmation email: {str(e)}")
         return False
 
-def _send_email_sync(sender_email: str, password: str, recipient_email: str, message: str):
-    """
-    Send an email using SMTP (synchronous function to be run in a thread pool)
-    """
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as server:
-            server.login(sender_email, password)
-            server.sendmail(sender_email, recipient_email, message)
-    except Exception as e:
-        logger.error(f"SMTP error: {str(e)}")
-        raise
-
-def extract_data_from_conversation(conversation: list[dict], data_type: str) -> Optional[str]:
-    """
-    Extract specific patient information from conversation history
-    
-    Args:
-        conversation: List of conversation messages
-        data_type: Type of data to extract ('name' or 'dob')
-        
-    Returns:
-        Extracted information or None if not found
-    """
-    patterns = {
-        'name': [
-            r"[Mm]y name is ([A-Za-z\s.',-]+)",
-            r"[Nn]ame is ([A-Za-z\s.',-]+)",
-            r"[Nn]ame: ([A-Za-z\s.',-]+)",
-            r"[Cc]all me ([A-Za-z\s.',-]+)",
-            r"[Tt]his is ([A-Za-z\s.',-]+)"
-        ],
-        'dob': [
-            r"[Bb]orn on (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
-            r"[Bb]irthday is (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
-            r"[Dd]ate of [Bb]irth:? (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
-            r"[Bb]irth date:? (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
-            r"[Dd][Oo][Bb]:? (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
-            r"[Bb]orn (?:on|in) ([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,? \d{4})",
-            r"[Bb]orn (?:on|in) ([A-Za-z]+ \d{1,2},? \d{4})"
-        ]
-    }
-    
-    if data_type not in patterns:
-        logger.warning(f"Unknown data type for extraction: {data_type}")
-        return None
-    
-    # Only process user messages
-    user_messages = [msg["content"] for msg in conversation if msg.get("role") == "user"]
-    
-    for message in user_messages:
-        for pattern in patterns[data_type]:
-            match = re.search(pattern, message)
-            if match:
-                extracted = match.group(1).strip()
-                logger.info(f"Extracted {data_type} from conversation: {extracted}")
-                return extracted
-    
-    logger.warning(f"Could not extract {data_type} from conversation history")
-    return None 
 async def process_call_end_from_context(
     fnc_ctx: ClinicMateFunctions, 
     patient_id: Optional[int] = None, 
@@ -613,24 +319,51 @@ async def process_call_end_from_context(
     # Try to save the patient to the database if we have the necessary info
     if patient_id is None:
         # Check if we have name and DOB
-        have_name = fnc_ctx.patient_name is not None and fnc_ctx.patient_name.strip() != ""
-        have_dob = fnc_ctx.date_of_birth is not None and fnc_ctx.date_of_birth.strip() != ""
+        have_name = bool(fnc_ctx.patient_name and fnc_ctx.patient_name.strip())
+        have_dob = bool(fnc_ctx.date_of_birth and fnc_ctx.date_of_birth.strip())
         
+        # If we're missing either name or DOB, try to extract them from conversation
+        if not have_name or not have_dob:
+            logger.warning(f"Missing critical patient data: Name: {have_name}, DOB: {have_dob}")
+            
+            # Try to extract missing name from conversation
+            if not have_name and hasattr(fnc_ctx, 'conversation_history'):
+                extracted_name = extract_data_from_conversation(fnc_ctx.conversation_history, 'name')
+                if extracted_name:
+                    fnc_ctx.patient_name = extracted_name
+                    patient_data['patient_name'] = extracted_name
+                    have_name = True
+                    logger.info(f"Extracted patient name from conversation: {extracted_name}")
+                    if log_queue:
+                        log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Extracted name from conversation: {extracted_name}\n\n")
+            
+            # Try to extract missing DOB from conversation
+            if not have_dob and hasattr(fnc_ctx, 'conversation_history'):
+                extracted_dob = extract_data_from_conversation(fnc_ctx.conversation_history, 'dob')
+                if extracted_dob:
+                    fnc_ctx.date_of_birth = extracted_dob
+                    patient_data['date_of_birth'] = extracted_dob
+                    have_dob = True
+                    logger.info(f"Extracted patient DOB from conversation: {extracted_dob}")
+                    if log_queue:
+                        log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Extracted DOB from conversation: {extracted_dob}\n\n")
+        
+        # If we have the minimum required fields, save the patient
         if have_name and have_dob:
-            # Check if patient_id is stored in the function context
-            if hasattr(fnc_ctx, 'database_patient_id') and fnc_ctx.database_patient_id:
-                patient_id = fnc_ctx.database_patient_id
-                logger.info(f"Using existing patient ID from context: {patient_id}")
-            else:
-                try:
+            try:
+                # Check if patient_id is stored in the function context
+                if hasattr(fnc_ctx, 'database_patient_id') and fnc_ctx.database_patient_id:
+                    patient_id = fnc_ctx.database_patient_id
+                    logger.info(f"Using existing patient ID from context: {patient_id}")
+                else:
                     patient_id = await database.save_patient_from_context(fnc_ctx)
                     if patient_id:
                         patient_data['patient_id'] = patient_id
                         logger.info(f"Patient saved to database with ID: {patient_id}")
                     else:
                         logger.warning("Failed to save patient to database at end of call")
-                except Exception as e:
-                    logger.error(f"Error saving patient to database at end of call: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error saving patient to database at end of call: {str(e)}")
         else:
             logger.warning(f"Cannot save patient to database: Missing name ({have_name}) or date of birth ({have_dob})")
     

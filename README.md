@@ -124,4 +124,45 @@ The system includes doctors in the following specialties:
 - Python 3.8+
 - LiveKit for voice orchestration
 - SQLite database (configurable to other SQL databases)
-- Asyncio for non-blocking operations 
+- Asyncio for non-blocking operations
+
+## Code Structure
+
+The Clinic-Mate system is organized into the following modular components:
+
+```
+clinic-mate/
+├── agent.py             # Main voice agent entry point and event handling
+├── api.py               # Function context and patient registration functions
+├── call_processor.py    # Call termination and summary processing
+├── database.py          # Database models and operations
+├── prompts.py           # System prompts for the LLM
+├── requirements.txt     # Project dependencies
+├── utils/               # Utility modules
+│   ├── __init__.py      # Package exports
+│   ├── appointment_utils.py  # Appointment-related utilities
+│   ├── date_utils.py    # Date and time parsing utilities
+│   ├── email_utils.py   # Email generation and sending
+│   ├── extraction_utils.py  # Data extraction from conversations
+│   └── summary_utils.py # Summary generation utilities
+└── scripts/             # Utility scripts for setup and testing
+    └── create_sample_data.py # Creates sample data for testing
+    └── create_inbound_trunk.py # Creates an inbound trunk for testing
+```
+
+### Core Components
+
+- **agent.py**: The main entry point that handles the voice processing pipeline, user interaction, and coordinates the system components
+- **api.py**: Contains the `ClinicMateFunctions` class with AI callable functions for patient registration and appointment booking
+- **call_processor.py**: Handles end-of-call operations like data persistence and summary generation
+- **database.py**: Contains SQLModel database models and functions for data management
+
+### Utility Modules
+
+The system has been designed with modularity in mind, with specialized utility modules:
+
+- **date_utils.py**: Handles date and time parsing with multiple format support
+- **email_utils.py**: Provides functionality for creating and sending email confirmations
+- **summary_utils.py**: Contains functions for generating formatted summaries
+- **extraction_utils.py**: Provides regex-based extraction of patient information from conversations
+- **appointment_utils.py**: Handles appointment-specific operations and formatting

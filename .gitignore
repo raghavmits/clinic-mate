@@ -8,9 +8,6 @@ clinic-env
 #Ignore the __pycache__ directory
 __pycache__/
 
-# Ignore scripts
-scripts/*
-scripts
 
 #Ignore patient_registration.log
 patient_registration*
@@ -30,6 +27,7 @@ test_email.py
 #Ignore docs
 docs/*
 docs
+
 
 
 
