@@ -7,6 +7,11 @@ import asyncio
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
 import re
+import os
+import smtplib
+import ssl
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 import database  # Import the database module
 from api import ClinicMateFunctions  # Import for type hints
@@ -182,7 +187,7 @@ def generate_call_summary(patient_data: Dict[str, Any]) -> str:
     patient_name = patient_data.get('patient_name', 'Unknown')
     
     # Start building the summary
-    summary = "# CLINIC-MATE CALL SUMMARY\n\n"
+    summary = "Thank you for calling Assort Medical Clinic. Here is a summary of your call: \n\n"
     
     # Check if we have critical patient information
     has_name = patient_data.get('patient_name') and patient_data['patient_name'].strip() != ""
@@ -377,7 +382,7 @@ def generate_call_summary(patient_data: Dict[str, Any]) -> str:
 
 async def send_confirmation_email(patient_data: Dict[str, Any]) -> bool:
     """
-    Send a confirmation email to the patient.
+    Send a confirmation email to the patient with their call summary.
     
     Args:
         patient_data: Dictionary containing patient information
@@ -386,33 +391,116 @@ async def send_confirmation_email(patient_data: Dict[str, Any]) -> bool:
         True if email was sent successfully, False otherwise
     """
     try:
-        # In a real implementation, this would connect to an email service
-        # For now, just log the action and simulate sending an email
+        # Get patient information
         patient_name = patient_data.get('patient_name', 'Unknown')
-        patient_email = patient_data.get('email')
+        sender_email = os.environ.get("EMAIL_SENDER")
+        recipient_email = os.environ.get("EMAIL_RECIPIENT")
         
-        if not patient_email:
-            logger.warning(f"Cannot send confirmation email - no email provided for {patient_name}")
+        if not recipient_email:
+            logger.warning(f"No email provided for {patient_name}, using default recipient")
+        
+        # Email configuration
+        sender_email = os.environ.get("EMAIL_SENDER")
+        password = os.environ.get("EMAIL_PASSWORD")  # Get from environment variable for security
+            
+        # If no password is set in environment variables, log an error
+        if not password:
+            logger.error("Email password not set in environment variables (EMAIL_PASSWORD)")
             return False
+            
+        # Create the email message
+        message = MIMEMultipart("alternative")
+        message["Subject"] = f"Clinic-Mate: Appointment Summary for {patient_name}"
+        message["From"] = sender_email
+        message["To"] = recipient_email
+                    
+        # Generate the call summary
+        call_summary = generate_call_summary(patient_data)
+                    
+        # Create the HTML version of the email
+        html_content = f"""
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                h1 {{ color: #0066cc; }}
+                h2 {{ color: #0066cc; margin-top: 20px; border-bottom: 1px solid #eee; padding-bottom: 5px; }}
+                .info-section {{ margin-bottom: 20px; }}
+                .footer {{ margin-top: 30px; font-size: 12px; color: #888; text-align: center; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>Assort Medical Clinic Call Summary</h1>
+                <div class="info-section">
+                    <pre>{call_summary}</pre>
+                </div>
+                <div class="footer">
+                    <p>This is an automated message from Clinic-Mate. Please do not reply to this email.</p>
+                    <p>© {datetime.now().year} Assort Clinic. All rights reserved.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
         
-        logger.info(f"Sending confirmation email to: {patient_email}")
+        # Create plain text version as a fallback
+        text_content = f"""
+        CLINIC-MATE CALL SUMMARY
         
-        # Check if registration is complete before sending confirmation
-        missing_fields = check_required_fields(patient_data)
-        if missing_fields:
-            logger.warning(f"Sending incomplete registration email - missing: {', '.join(missing_fields)}")
+        {call_summary}
+                
+        This is an automated message from Clinic-Mate. Please do not reply to this email.
+        © {datetime.now().year} Assort Clinic. All rights reserved.
+        """
+                
+        # Attach parts to the message
+        part1 = MIMEText(text_content, "plain")
+        part2 = MIMEText(html_content, "html")
+        message.attach(part1)
+        message.attach(part2)
         
-        # Simulate email sending operation with a short delay
-        await asyncio.sleep(1.0)
-        
-        # Log a timestamp of when the email was sent
+        # Connect to the SMTP server and send the email
+        logger.info(f"Attempting to send email to: {recipient_email}")
+            
+        # Create a secure SSL context
+        context = ssl.create_default_context()
+                
+        # Use asyncio to run the blocking SMTP operations in a thread pool
+        await asyncio.to_thread(_send_email_sync, sender_email, password, recipient_email, message.as_string())
+                    
+        # Log success
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info(f"Confirmation email sent at: {timestamp}")
+        
+        # Save a copy of the call summary to a file
+        timestamp_file = datetime.now().strftime('%Y%m%d_%H%M%S')
+        patient_name_safe = patient_name.replace(" ", "_")
+        filename = f"call_summary_{patient_name_safe}_{timestamp_file}.txt"
+        
+        # Use aiofile to write the file asynchronously
+        with open(filename, "w") as f:
+            f.write(call_summary)
+        
+        logger.info(f"Call summary saved to file: {filename}")
         
         return True
     except Exception as e:
         logger.error(f"Error sending confirmation email: {str(e)}")
         return False
+
+def _send_email_sync(sender_email: str, password: str, recipient_email: str, message: str):
+    """
+    Send an email using SMTP (synchronous function to be run in a thread pool)
+    """
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as server:
+            server.login(sender_email, password)
+            server.sendmail(sender_email, recipient_email, message)
+    except Exception as e:
+        logger.error(f"SMTP error: {str(e)}")
+        raise
 
 def extract_data_from_conversation(conversation: list[dict], data_type: str) -> Optional[str]:
     """
@@ -460,8 +548,7 @@ def extract_data_from_conversation(conversation: list[dict], data_type: str) -> 
                 return extracted
     
     logger.warning(f"Could not extract {data_type} from conversation history")
-    return None
-
+    return None 
 async def process_call_end_from_context(
     fnc_ctx: ClinicMateFunctions, 
     patient_id: Optional[int] = None, 

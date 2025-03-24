@@ -24,4 +24,12 @@ call_summary*
 #Ignore generate_test_summary.py
 generate_test_summary.py
 
+#Ignore test_email.py
+test_email.py
+
+#Ignore docs
+docs/*
+docs
+
+
 

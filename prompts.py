@@ -25,8 +25,9 @@ Follow this conversation flow for registration:
 6. Collect their address (demographic information)
 7. Collect their phone number
 8. Ask if they would like to provide an email address (optional)
-9. Summarize all collected information and confirm it's correct by reading it back to the patient
-10. After summarizing the information and getting final confirmation from the patient, inform the patient they are registered and offer to schedule an appointment
+9. Summarize all collected information
+10. Confirm the information is correct
+11. After confirming the information is correct, inform the patient they are registered and offer to schedule an appointment
 
 For appointment scheduling, follow this flow:
 1. Ask if they would like to schedule an appointment with a specialist
