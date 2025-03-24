@@ -11,6 +11,7 @@ from prompts import CHAT_INSTRUCTIONS, INITIAL_MESSAGE
 from api import ClinicMateFunctions
 import call_processor
 import database 
+from typing import Dict, Any
 
 logger = logging.getLogger("hospital-registration")
 logger.setLevel(logging.INFO)
@@ -72,43 +73,107 @@ async def entrypoint(ctx: JobContext):
         log_queue.put_nowait(f"[{datetime.now()}] AGENT:\n{msg.content}\n\n")
     
     @agent.on("function_call_succeeded")
-    def on_function_call_succeeded(name: str, result: str):
-        """
-        Handle successful function calls to incrementally save patient information
-        to the database as it is collected during the call
-        """
-        # Create an async task to handle the database operations
-        asyncio.create_task(handle_function_success(name, result))
-        
-        # Log in a synchronous manner
-        log_queue.put_nowait(f"[{datetime.now()}] FUNCTION CALL: {name}\nRESULT: {result}\n\n")
-    
-    async def handle_function_success(name: str, result: str):
-        """Async handler for function call success"""
+    async def on_function_call_succeeded(
+        func_name: str,
+        func_args: Dict[str, Any],
+        func_result: Any,
+        ctx: ClinicMateFunctions,
+    ):
+        """Handle post-function call logic when a function succeeds."""
         nonlocal patient_id
         
-        # If we've confirmed the patient information, save to the database
-        if name == "confirm_information" and fnc_ctx.is_registered:
-            # Only save if we haven't already saved the patient
-            if patient_id is None:
+        logger.info(f"Function {func_name} succeeded with result: {func_result}")
+        
+        # Log in a synchronous manner
+        log_queue.put_nowait(f"[{datetime.now()}] FUNCTION CALL: {func_name}\nRESULT: {func_result}\n\n")
+        
+        # If this is a register_patient function call, let's capture the initial patient data
+        if func_name == "register_patient":
+            if "patient_name" in func_args and func_args["patient_name"]:
+                ctx.patient_name = func_args["patient_name"]
+                logger.info(f"Set patient name from register_patient: {ctx.patient_name}")
+                log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Captured patient name: {ctx.patient_name}\n\n")
+            
+            if func_args.get("date_of_birth"):
+                ctx.date_of_birth = func_args["date_of_birth"]
+                logger.info(f"Set patient DOB from register_patient: {ctx.date_of_birth}")
+                log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Captured DOB: {ctx.date_of_birth}\n\n")
+        
+        # If this is a confirm_information function, check if we have enough patient data
+        # before trying to save the patient
+        if func_name == "confirm_information" and func_args.get("confirmed"):
+            logger.info("Patient information confirmed. Checking for complete data...")
+            
+            # Check if we have the minimum required fields
+            have_name = bool(ctx.patient_name and ctx.patient_name.strip())
+            have_dob = bool(ctx.date_of_birth and ctx.date_of_birth.strip())
+            
+            # If we're missing either name or DOB, try to extract them from conversation
+            if not have_name or not have_dob:
+                logger.warning(f"Missing critical patient data: Name: {have_name}, DOB: {have_dob}")
+                
+                # Import the extraction function from call_processor
+                from call_processor import extract_data_from_conversation
+                
+                # Try to extract missing name from conversation
+                if not have_name and hasattr(ctx, 'conversation_history'):
+                    extracted_name = extract_data_from_conversation(ctx.conversation_history, 'name')
+                    if extracted_name:
+                        ctx.patient_name = extracted_name
+                        have_name = True
+                        logger.info(f"Extracted patient name from conversation: {extracted_name}")
+                        log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Extracted name from conversation: {extracted_name}\n\n")
+                
+                # Try to extract missing DOB from conversation
+                if not have_dob and hasattr(ctx, 'conversation_history'):
+                    extracted_dob = extract_data_from_conversation(ctx.conversation_history, 'dob')
+                    if extracted_dob:
+                        ctx.date_of_birth = extracted_dob
+                        have_dob = True
+                        logger.info(f"Extracted patient DOB from conversation: {extracted_dob}")
+                        log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Extracted DOB from conversation: {extracted_dob}\n\n")
+            
+            # If we have the minimum required fields, save the patient
+            if have_name and have_dob:
                 try:
-                    # Try to save the patient to the database using the database module function
-                    patient_id = await database.save_patient_from_context(fnc_ctx)
+                    patient_id = await database.save_patient_from_context(ctx)
                     if patient_id:
+                        ctx.database_patient_id = patient_id
+                        logger.info(f"Registration completed for patient: {ctx.patient_name} (ID: {patient_id})")
                         log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Patient saved to database with ID {patient_id}\n\n")
+                    else:
+                        logger.warning(f"Registration failed for patient: {ctx.patient_name}")
+                        log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Failed to save patient to database\n\n")
                 except Exception as e:
-                    logger.error(f"Error saving patient to database: {str(e)}")
+                    logger.error(f"Error saving patient: {str(e)}")
+                    log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Error saving patient: {str(e)}\n\n")
+            else:
+                logger.warning(f"Cannot save patient to database: Missing name ({have_name}) or date of birth ({have_dob})")
+                log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Cannot save patient to database: Missing required information\n\n")
         
         # If specific information is collected, incrementally update existing patient record
-        if patient_id and name in ("collect_insurance_info", "collect_medical_complaint", 
-                               "collect_address", "collect_phone", "collect_email"):
+        if patient_id and func_name in ("collect_insurance_info", "collect_medical_complaint", 
+                                      "collect_address", "collect_phone", "collect_email"):
             try:
-                # Update the patient record with newly collected information using the database module function
-                success = await database.update_patient_from_context(patient_id, fnc_ctx, name)
-                if not success:
-                    logger.warning(f"Failed to update patient record for {name}")
+                # Update the patient record with newly collected information
+                success = await database.update_patient_from_context(patient_id, ctx, func_name)
+                if success:
+                    logger.info(f"Updated patient record with {func_name} information")
+                    log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Updated patient record with {func_name} information\n\n")
+                else:
+                    logger.warning(f"Failed to update patient record for {func_name}")
+                    log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Failed to update patient record with {func_name} information\n\n")
             except Exception as e:
                 logger.error(f"Error updating patient record: {str(e)}")
+                log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Error updating patient record: {str(e)}\n\n")
+        
+        # Store the appointment ID if booking was successful
+        if func_name == "book_appointment" and isinstance(func_result, dict) and func_result.get('appointment_id'):
+            ctx.appointment_id = func_result['appointment_id']
+            if func_result.get('appointment_details'):
+                ctx.appointment_details = func_result['appointment_details']
+            logger.info(f"Stored appointment ID: {ctx.appointment_id}")
+            log_queue.put_nowait(f"[{datetime.now()}] SYSTEM: Stored appointment ID: {ctx.appointment_id}\n\n")
 
     async def process_end_of_call():
         """Process end-of-call tasks like saving data and generating summaries"""

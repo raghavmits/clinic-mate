@@ -6,6 +6,7 @@ import logging
 import asyncio
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any, Tuple
+import re
 
 import database  # Import the database module
 from api import ClinicMateFunctions  # Import for type hints
@@ -169,82 +170,134 @@ async def save_patient_data(patient_data: Dict[str, Any]) -> bool:
 
 def generate_call_summary(patient_data: Dict[str, Any]) -> str:
     """
-    Generate a summary of the call based on patient data.
+    Generate a readable call summary from patient data
     
     Args:
         patient_data: Dictionary containing patient information
         
     Returns:
-        A string containing the call summary
+        Formatted call summary as a string
     """
-    try:
-        summary_parts = []
-        
-        # Add patient name and time
-        patient_name = patient_data.get('patient_name', 'Unknown')
-        summary_parts.append(f"Call summary for {patient_name} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # Check if data collection is complete
-        missing_fields = check_required_fields(patient_data)
-        if missing_fields:
-            summary_parts.append(f"\n⚠️ REGISTRATION INCOMPLETE - Missing information: {', '.join(missing_fields)}")
+    # Get patient name, with fallback to "Unknown" if not present
+    patient_name = patient_data.get('patient_name', 'Unknown')
+    
+    # Start building the summary
+    summary = "# CLINIC-MATE CALL SUMMARY\n\n"
+    
+    # Check if we have critical patient information
+    has_name = patient_data.get('patient_name') and patient_data['patient_name'].strip() != ""
+    has_dob = patient_data.get('date_of_birth') and patient_data['date_of_birth'].strip() != ""
+    
+    # Add warning if critical information is missing
+    if not has_name or not has_dob:
+        summary += "⚠️ **WARNING: INCOMPLETE PATIENT RECORD** ⚠️\n"
+        summary += "The following critical information is missing:\n"
+        if not has_name:
+            summary += "- Patient name\n"
+        if not has_dob:
+            summary += "- Date of birth\n"
+        summary += "\nThis patient record may not have been saved to the database properly.\n\n"
+    
+    # Add patient information section
+    summary += "## Patient Information\n"
+    summary += f"- **Name**: {patient_name}\n"
+    
+    if has_dob:
+        summary += f"- **Date of Birth**: {patient_data.get('date_of_birth', 'Not provided')}\n"
+    else:
+        summary += f"- **Date of Birth**: Not provided\n"
+    
+    if patient_data.get('phone_number'):
+        summary += f"- **Phone**: {patient_data['phone_number']}\n"
+    
+    if patient_data.get('email'):
+        summary += f"- **Email**: {patient_data['email']}\n"
+    
+    if patient_data.get('address'):
+        summary += f"- **Address**: {patient_data['address']}\n"
+    
+    # Add database information if available
+    if patient_data.get('patient_id'):
+        summary += f"- **Patient ID**: {patient_data['patient_id']} (Successfully saved to database)\n"
+    else:
+        if has_name and has_dob:
+            summary += "- **Database Status**: Not saved to database (Error occurred)\n"
         else:
-            summary_parts.append("\n✅ REGISTRATION COMPLETE - All required information collected")
+            summary += "- **Database Status**: Not saved to database (Missing required information)\n"
+    
+    # Add insurance section if available
+    if any(k in patient_data for k in ['insurance_provider', 'insurance_id', 'has_referral']):
+        summary += "\n## Insurance Information\n"
         
-        # Add data collected during call
-        summary_parts.append("\nINFORMATION COLLECTED:")
-        
-        if patient_data.get('patient_name'):
-            summary_parts.append(f"- Name: {patient_data['patient_name']}")
-            
-        if patient_data.get('date_of_birth'):
-            summary_parts.append(f"- Date of Birth: {patient_data['date_of_birth']}")
-            
         if patient_data.get('insurance_provider'):
-            summary_parts.append(f"- Insurance: {patient_data['insurance_provider']} (ID: {patient_data.get('insurance_id', 'Not provided')})")
+            summary += f"- **Provider**: {patient_data['insurance_provider']}\n"
+        
+        if patient_data.get('insurance_id'):
+            summary += f"- **Insurance ID**: {patient_data['insurance_id']}\n"
+        
+        if 'has_referral' in patient_data:
+            referral_status = "Yes" if patient_data['has_referral'] else "No"
+            summary += f"- **Has Referral**: {referral_status}\n"
             
-        if patient_data.get('has_referral'):
-            if patient_data.get('referred_physician'):
-                summary_parts.append(f"- Referral: Yes, to {patient_data['referred_physician']}")
+            if patient_data.get('has_referral') and patient_data.get('referred_physician'):
+                summary += f"- **Referred By**: {patient_data['referred_physician']}\n"
+    
+    # Add medical complaint if available
+    if patient_data.get('medical_complaint'):
+        summary += "\n## Medical Information\n"
+        summary += f"- **Complaint**: {patient_data['medical_complaint']}\n"
+    
+    # Add appointment information if available
+    if patient_data.get('wants_appointment'):
+        summary += "\n## Appointment Information\n"
+        
+        if patient_data.get('appointment_id') and patient_data.get('appointment_details'):
+            details = patient_data['appointment_details']
+            summary += f"- **Status**: Appointment successfully booked\n"
+            summary += f"- **Appointment ID**: {patient_data['appointment_id']}\n"
+            
+            if isinstance(details, dict):
+                # Format appointment date and time
+                if details.get('date') and details.get('time'):
+                    summary += f"- **Date & Time**: {details['date']} at {details['time']}\n"
+                
+                # Add doctor information
+                if details.get('doctor_name'):
+                    summary += f"- **Doctor**: {details['doctor_name']}\n"
+                
+                # Add specialty information
+                if details.get('specialty'):
+                    summary += f"- **Specialty**: {details['specialty']}\n"
+                
+                # Add location information
+                if details.get('location'):
+                    summary += f"- **Location**: {details['location']}\n"
             else:
-                summary_parts.append("- Referral: Yes (physician not specified)")
+                # If appointment_details is not a dictionary, just include it as is
+                summary += f"- **Details**: {details}\n"
+        elif patient_data.get('specialty_preference') or patient_data.get('doctor_preference'):
+            summary += "- **Status**: Appointment requested but not confirmed\n"
+            
+            if patient_data.get('specialty_preference'):
+                summary += f"- **Preferred Specialty**: {patient_data['specialty_preference']}\n"
+            
+            if patient_data.get('doctor_preference'):
+                summary += f"- **Preferred Doctor**: {patient_data['doctor_preference']}\n"
         else:
-            summary_parts.append("- Referral: No")
-            
-        if patient_data.get('medical_complaint'):
-            summary_parts.append(f"- Reason for Visit: {patient_data['medical_complaint']}")
-            
-        if patient_data.get('address'):
-            summary_parts.append(f"- Address: {patient_data['address']}")
-            
-        if patient_data.get('phone_number'):
-            summary_parts.append(f"- Phone: {patient_data['phone_number']}")
-            
-        if patient_data.get('email'):
-            summary_parts.append(f"- Email: {patient_data['email']}")
-            
-        # Add status
-        if patient_data.get('is_registered'):
-            summary_parts.append("\nSTATUS: Registration Complete")
-        else:
-            summary_parts.append("\nSTATUS: Registration Incomplete")
-        
-        # Add next steps
-        if patient_data.get('is_registered'):
-            summary_parts.append("\nNEXT STEPS: Patient should arrive 15 minutes before their scheduled appointment time.")
-        else:
-            summary_parts.append("\nNEXT STEPS: Patient needs to complete registration before their appointment.")
-            
-        # Join all parts into a full summary
-        full_summary = "\n".join(summary_parts)
-        
-        # Log the summary
-        logger.info(f"Generated call summary for {patient_name}")
-        
-        return full_summary
-    except Exception as e:
-        logger.error(f"Error generating call summary: {str(e)}")
-        return f"Error generating call summary: {str(e)}"
+            summary += "- **Status**: Patient expressed interest in appointment, but no details provided\n"
+    
+    # Add registration status
+    summary += "\n## Registration Status\n"
+    if patient_data.get('is_registered'):
+        summary += "- **Status**: Completed\n"
+    else:
+        stage = patient_data.get('registration_stage', 'Not started')
+        summary += f"- **Status**: In progress ({stage})\n"
+    
+    # Add timestamp
+    summary += f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+    
+    return summary
 
 async def send_confirmation_email(patient_data: Dict[str, Any]) -> bool:
     """
@@ -285,7 +338,53 @@ async def send_confirmation_email(patient_data: Dict[str, Any]) -> bool:
         logger.error(f"Error sending confirmation email: {str(e)}")
         return False
 
-# Function moved from agent.py to improve modularity
+def extract_data_from_conversation(conversation: list[dict], data_type: str) -> Optional[str]:
+    """
+    Extract specific patient information from conversation history
+    
+    Args:
+        conversation: List of conversation messages
+        data_type: Type of data to extract ('name' or 'dob')
+        
+    Returns:
+        Extracted information or None if not found
+    """
+    patterns = {
+        'name': [
+            r"[Mm]y name is ([A-Za-z\s.',-]+)",
+            r"[Nn]ame is ([A-Za-z\s.',-]+)",
+            r"[Nn]ame: ([A-Za-z\s.',-]+)",
+            r"[Cc]all me ([A-Za-z\s.',-]+)",
+            r"[Tt]his is ([A-Za-z\s.',-]+)"
+        ],
+        'dob': [
+            r"[Bb]orn on (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+            r"[Bb]irthday is (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+            r"[Dd]ate of [Bb]irth:? (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+            r"[Bb]irth date:? (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+            r"[Dd][Oo][Bb]:? (\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+            r"[Bb]orn (?:on|in) ([A-Za-z]+ \d{1,2}(?:st|nd|rd|th)?,? \d{4})",
+            r"[Bb]orn (?:on|in) ([A-Za-z]+ \d{1,2},? \d{4})"
+        ]
+    }
+    
+    if data_type not in patterns:
+        logger.warning(f"Unknown data type for extraction: {data_type}")
+        return None
+    
+    # Only process user messages
+    user_messages = [msg["content"] for msg in conversation if msg.get("role") == "user"]
+    
+    for message in user_messages:
+        for pattern in patterns[data_type]:
+            match = re.search(pattern, message)
+            if match:
+                extracted = match.group(1).strip()
+                logger.info(f"Extracted {data_type} from conversation: {extracted}")
+                return extracted
+    
+    logger.warning(f"Could not extract {data_type} from conversation history")
+    return None
 
 async def process_call_end_from_context(
     fnc_ctx: ClinicMateFunctions, 
@@ -305,6 +404,23 @@ async def process_call_end_from_context(
     """
     logger.info("Processing end of call tasks from context")
     
+    # Log the current patient name and DOB for debugging
+    logger.info(f"Patient name from context: {fnc_ctx.patient_name}")
+    logger.info(f"Patient DOB from context: {fnc_ctx.date_of_birth}")
+    
+    # Try to extract missing patient name and DOB from conversation if they're not in the context
+    if (not fnc_ctx.patient_name or fnc_ctx.patient_name.strip() == "") and hasattr(fnc_ctx, 'conversation_history'):
+        extracted_name = extract_data_from_conversation(fnc_ctx.conversation_history, 'name')
+        if extracted_name:
+            fnc_ctx.patient_name = extracted_name
+            logger.info(f"Recovered patient name from conversation: {extracted_name}")
+    
+    if (not fnc_ctx.date_of_birth or fnc_ctx.date_of_birth.strip() == "") and hasattr(fnc_ctx, 'conversation_history'):
+        extracted_dob = extract_data_from_conversation(fnc_ctx.conversation_history, 'dob')
+        if extracted_dob:
+            fnc_ctx.date_of_birth = extracted_dob
+            logger.info(f"Recovered patient DOB from conversation: {extracted_dob}")
+    
     # Convert function context to dictionary format
     patient_data = {
         'patient_name': fnc_ctx.patient_name,
@@ -318,18 +434,52 @@ async def process_call_end_from_context(
         'phone_number': fnc_ctx.phone_number,
         'email': fnc_ctx.email,
         'is_registered': fnc_ctx.is_registered,
-        'registration_stage': fnc_ctx.registration_stage
+        'registration_stage': fnc_ctx.registration_stage,
+        # Include appointment information
+        'wants_appointment': fnc_ctx.wants_appointment,
+        'specialty_preference': fnc_ctx.specialty_preference,
+        'doctor_preference': fnc_ctx.doctor_preference,
+        'appointment_id': fnc_ctx.appointment_id
     }
     
-    # If we haven't already saved to the database and we have the minimum required info, do it now
-    if patient_id is None and fnc_ctx.patient_name and fnc_ctx.date_of_birth:
+    # Add appointment details if they exist
+    if hasattr(fnc_ctx, 'appointment_details') and fnc_ctx.appointment_details:
+        patient_data['appointment_details'] = fnc_ctx.appointment_details
+        logger.info(f"Including appointment details in call summary: {fnc_ctx.appointment_details}")
+    
+    # Try to save the patient to the database if we have the necessary info
+    if patient_id is None:
+        # Check if we have name and DOB
+        have_name = fnc_ctx.patient_name is not None and fnc_ctx.patient_name.strip() != ""
+        have_dob = fnc_ctx.date_of_birth is not None and fnc_ctx.date_of_birth.strip() != ""
+        
+        if have_name and have_dob:
+            # Check if patient_id is stored in the function context
+            if hasattr(fnc_ctx, 'database_patient_id') and fnc_ctx.database_patient_id:
+                patient_id = fnc_ctx.database_patient_id
+                logger.info(f"Using existing patient ID from context: {patient_id}")
+            else:
+                try:
+                    patient_id = await database.save_patient_from_context(fnc_ctx)
+                    if patient_id:
+                        patient_data['patient_id'] = patient_id
+                        logger.info(f"Patient saved to database with ID: {patient_id}")
+                    else:
+                        logger.warning("Failed to save patient to database at end of call")
+                except Exception as e:
+                    logger.error(f"Error saving patient to database at end of call: {str(e)}")
+        else:
+            logger.warning(f"Cannot save patient to database: Missing name ({have_name}) or date of birth ({have_dob})")
+    
+    # If we have an appointment ID but not the details, try to fetch them now
+    if fnc_ctx.appointment_id and not fnc_ctx.appointment_details:
         try:
-            patient_id = await database.save_patient_from_context(fnc_ctx)
-            if patient_id:
-                patient_data['patient_id'] = patient_id
-                logger.info(f"Patient saved to database with ID: {patient_id}")
+            appointment_details = await database.get_appointment_details(fnc_ctx.appointment_id)
+            if appointment_details:
+                patient_data['appointment_details'] = appointment_details
+                logger.info(f"Retrieved appointment details for ID: {fnc_ctx.appointment_id}")
         except Exception as e:
-            logger.error(f"Error saving patient to database at end of call: {str(e)}")
+            logger.error(f"Error retrieving appointment details: {str(e)}")
     
     # Process the end of call using our regular process_call_end function
     summary = await process_call_end(patient_data)
