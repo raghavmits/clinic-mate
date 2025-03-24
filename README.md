@@ -67,14 +67,15 @@ Intelligent matching is implemented through specialized helper functions:
 ## Installation
 
 ```bash
+#Update the .env file with your own credentials
+cp .env.example .env
+
 # Install dependencies
 pip install -r requirements.txt
 
 # Create the sample data (specialties, doctors and availabilities)
 python scripts/create_sample_data.py
 
-# Set up email credentials (for appointment confirmations)
-export EMAIL_PASSWORD='your_app_password'
 ```
 
 For detailed email setup instructions, see [Email Setup Guide](docs/email_setup.md).
@@ -89,13 +90,6 @@ python agent.py dev
 
 # Production mode
 python agent.py start
-```
-
-### Testing Appointment Summaries
-
-```bash
-# Generate test appointment summaries
-python generate_test_summary.py
 ```
 
 ## Available Medical Specialties
