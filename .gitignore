@@ -21,4 +21,7 @@ clinic_mate.db
 #Ignore the call_summaries
 call_summary*
 
+#Ignore generate_test_summary.py
+generate_test_summary.py
+
 

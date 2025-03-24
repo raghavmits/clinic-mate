@@ -199,100 +199,176 @@ def generate_call_summary(patient_data: Dict[str, Any]) -> str:
         summary += "\nThis patient record may not have been saved to the database properly.\n\n"
     
     # Add patient information section
-    summary += "## Patient Information\n"
-    summary += f"- **Name**: {patient_name}\n"
+    summary += "PATIENT INFORMATION\n"
+    summary += f"- Name: {patient_name}\n"
     
     if has_dob:
-        summary += f"- **Date of Birth**: {patient_data.get('date_of_birth', 'Not provided')}\n"
+        summary += f"- Date of Birth: {patient_data.get('date_of_birth', 'Not provided')}\n"
     else:
-        summary += f"- **Date of Birth**: Not provided\n"
+        summary += f"- Date of Birth: Not provided\n"
     
     if patient_data.get('phone_number'):
-        summary += f"- **Phone**: {patient_data['phone_number']}\n"
+        summary += f"- Phone: {patient_data['phone_number']}\n"
     
     if patient_data.get('email'):
-        summary += f"- **Email**: {patient_data['email']}\n"
+        summary += f"- Email: {patient_data['email']}\n"
     
     if patient_data.get('address'):
-        summary += f"- **Address**: {patient_data['address']}\n"
+        summary += f"- Address: {patient_data['address']}\n"
     
     # Add database information if available
     if patient_data.get('patient_id'):
-        summary += f"- **Patient ID**: {patient_data['patient_id']} (Successfully saved to database)\n"
+        summary += f"- Patient ID: {patient_data['patient_id']} (Successfully saved to database)\n"
     else:
         if has_name and has_dob:
-            summary += "- **Database Status**: Not saved to database (Error occurred)\n"
+            summary += "- Database Status: Not saved to database (Error occurred)\n"
         else:
-            summary += "- **Database Status**: Not saved to database (Missing required information)\n"
+            summary += "- Database Status: Not saved to database (Missing required information)\n"
     
     # Add insurance section if available
     if any(k in patient_data for k in ['insurance_provider', 'insurance_id', 'has_referral']):
-        summary += "\n## Insurance Information\n"
+        summary += "\nINSURANCE INFORMATION\n"
         
         if patient_data.get('insurance_provider'):
-            summary += f"- **Provider**: {patient_data['insurance_provider']}\n"
+            summary += f"- Provider: {patient_data['insurance_provider']}\n"
         
         if patient_data.get('insurance_id'):
-            summary += f"- **Insurance ID**: {patient_data['insurance_id']}\n"
+            summary += f"- Insurance ID: {patient_data['insurance_id']}\n"
         
         if 'has_referral' in patient_data:
             referral_status = "Yes" if patient_data['has_referral'] else "No"
-            summary += f"- **Has Referral**: {referral_status}\n"
+            summary += f"- Has Referral: {referral_status}\n"
             
             if patient_data.get('has_referral') and patient_data.get('referred_physician'):
-                summary += f"- **Referred By**: {patient_data['referred_physician']}\n"
+                summary += f"- Referred By: {patient_data['referred_physician']}\n"
     
     # Add medical complaint if available
     if patient_data.get('medical_complaint'):
-        summary += "\n## Medical Information\n"
-        summary += f"- **Complaint**: {patient_data['medical_complaint']}\n"
+        summary += "\nMEDICAL INFORMATION\n"
+        summary += f"- Complaint: {patient_data['medical_complaint']}\n"
     
     # Add appointment information if available
-    if patient_data.get('wants_appointment'):
-        summary += "\n## Appointment Information\n"
+    # Check both wants_appointment and appointment_details since sometimes appointment details
+    # exist even when wants_appointment is not set to True
+    has_appointment_info = (patient_data.get('wants_appointment') or 
+                           patient_data.get('appointment_details') or 
+                           patient_data.get('doctor_preference') or
+                           patient_data.get('specialty_preference'))
+    
+    if has_appointment_info:
+        summary += "\nAPPOINTMENT INFORMATION\n"
         
+        # Case 1: We have a confirmed appointment with details and ID
         if patient_data.get('appointment_id') and patient_data.get('appointment_details'):
             details = patient_data['appointment_details']
-            summary += f"- **Status**: Appointment successfully booked\n"
-            summary += f"- **Appointment ID**: {patient_data['appointment_id']}\n"
+            summary += f"- Status: Appointment successfully booked\n"
+            summary += f"- Appointment ID: {patient_data['appointment_id']}\n"
             
             if isinstance(details, dict):
-                # Format appointment date and time
-                if details.get('date') and details.get('time'):
-                    summary += f"- **Date & Time**: {details['date']} at {details['time']}\n"
+                # Try different possible date/time formats based on actual data structure
+                date_time = None
+                if details.get('date_time'):
+                    date_time = details['date_time']
+                elif details.get('date') and details.get('time'):
+                    date_time = f"{details['date']} at {details['time']}"
                 
-                # Add doctor information
-                if details.get('doctor_name'):
-                    summary += f"- **Doctor**: {details['doctor_name']}\n"
+                if date_time:
+                    summary += f"- Date & Time: {date_time}\n"
                 
-                # Add specialty information
-                if details.get('specialty'):
-                    summary += f"- **Specialty**: {details['specialty']}\n"
+                # Doctor information with different possible structures
+                doctor_name = None
+                doctor_specialty = None
                 
-                # Add location information
+                # Handle doctor information in different possible formats
+                if details.get('doctor'):
+                    doctor_dict = details['doctor']
+                    if isinstance(doctor_dict, dict):
+                        doctor_name = doctor_dict.get('name')
+                        doctor_specialty = doctor_dict.get('specialty')
+                elif details.get('doctor_name'):
+                    doctor_name = details['doctor_name']
+                
+                if doctor_name:
+                    summary += f"- Doctor: {doctor_name}\n"
+                
+                # Specialty information
+                if doctor_specialty:
+                    summary += f"- Specialty: {doctor_specialty}\n"
+                elif details.get('specialty'):
+                    summary += f"- Specialty: {details['specialty']}\n"
+                
+                # Location information
                 if details.get('location'):
-                    summary += f"- **Location**: {details['location']}\n"
+                    summary += f"- Location: {details['location']}\n"
+                else:
+                    summary += f"- Location: Assort Medical Clinic Main Campus\n"
+                
+                # Duration information if available
+                if details.get('duration_minutes'):
+                    summary += f"- Duration: {details['duration_minutes']} minutes\n"
             else:
                 # If appointment_details is not a dictionary, just include it as is
-                summary += f"- **Details**: {details}\n"
+                summary += f"- Details: {details}\n"
+        
+        # Case 2: Appointment is pending/requested but not confirmed
+        elif patient_data.get('appointment_details') and isinstance(patient_data['appointment_details'], dict):
+            details = patient_data['appointment_details']
+            status = details.get('status', 'pending')
+            summary += f"- Status: Appointment {status}\n"
+            
+            # Try to get doctor information
+            doctor_name = None
+            doctor_specialty = None
+            
+            if details.get('doctor') and isinstance(details['doctor'], dict):
+                doctor_dict = details['doctor']
+                doctor_name = doctor_dict.get('name')
+                doctor_specialty = doctor_dict.get('specialty')
+            
+            # Get date and time
+            date_time = details.get('date_time')
+            if date_time:
+                summary += f"- Requested Date & Time: {date_time}\n"
+            
+            if doctor_name:
+                summary += f"- Requested Doctor: {doctor_name}\n"
+            
+            if doctor_specialty:
+                summary += f"- Specialty: {doctor_specialty}\n"
+            
+            # Add error information if present
+            if details.get('error'):
+                summary += f"- Note: Appointment scheduling needs follow-up: {details['error']}\n"
+            
+            summary += "- The clinic will contact you to confirm your appointment details.\n"
+        
+        # Case 3: Patient indicated preferences but no appointment was created
         elif patient_data.get('specialty_preference') or patient_data.get('doctor_preference'):
-            summary += "- **Status**: Appointment requested but not confirmed\n"
+            summary += "- Status: Appointment requested but not confirmed\n"
             
             if patient_data.get('specialty_preference'):
-                summary += f"- **Preferred Specialty**: {patient_data['specialty_preference']}\n"
+                summary += f"- Preferred Specialty: {patient_data['specialty_preference']}\n"
             
             if patient_data.get('doctor_preference'):
-                summary += f"- **Preferred Doctor**: {patient_data['doctor_preference']}\n"
+                summary += f"- Preferred Doctor: {patient_data['doctor_preference']}\n"
+            
+            summary += "- The clinic will contact you to schedule your appointment.\n"
+        
+        # Case 4: Basic interest in appointments but no details
         else:
-            summary += "- **Status**: Patient expressed interest in appointment, but no details provided\n"
+            summary += "- Status: Patient expressed interest in appointment, but no details provided\n"
+            summary += "- Please call back to schedule a specific appointment.\n"
+        
+        # Add reminder
+        summary += "- Please arrive 15 minutes early and bring your insurance card and ID.\n"
     
     # Add registration status
-    summary += "\n## Registration Status\n"
+    summary += "\nREGISTRATION STATUS\n"
     if patient_data.get('is_registered'):
-        summary += "- **Status**: Completed\n"
+        summary += "- Status: Completed\n"
     else:
         stage = patient_data.get('registration_stage', 'Not started')
-        summary += f"- **Status**: In progress ({stage})\n"
+        summary += f"- Status: In progress ({stage})\n"
     
     # Add timestamp
     summary += f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"

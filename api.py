@@ -249,6 +249,13 @@ class ClinicMateFunctions(llm.FunctionContext):
         """Check if the patient wants to schedule an appointment"""
         self.wants_appointment = wants_appointment
         
+        # Initialize these to empty strings to avoid NoneType errors
+        if self.doctor_preference is None:
+            self.doctor_preference = ""
+        
+        if self.specialty_preference is None:
+            self.specialty_preference = ""
+        
         if wants_appointment:
             # Import here to avoid circular imports
             import database
@@ -271,12 +278,12 @@ class ClinicMateFunctions(llm.FunctionContext):
         # Import here to avoid circular imports
         import database
         
-        # Find the specialty
-        specialty_obj = await database.get_specialty_by_name(specialty)
+        # Find the specialty using the new helper function for better matching
+        specialty_obj = await database.find_specialty_by_name(specialty)
         
         if not specialty_obj:
             logger.warning(f"Specialty not found: {specialty}")
-            return f"I'm sorry, I couldn't find '{specialty}' in our system. Please choose from one of our available specialties."
+            return f"I'm sorry, I couldn't find '{specialty}' in our system. Please choose from one of our available specialties: Cardiology, Ophthalmology, Otolaryngology (ENT), Orthopedics, Neurology, Dermatology, Pulmonology, or Gastroenterology."
         
         # Get doctors in this specialty
         doctors = await database.get_doctors_by_specialty(specialty_obj.id)
@@ -289,34 +296,29 @@ class ClinicMateFunctions(llm.FunctionContext):
         doctor_list = "\n".join([f"- {d.name}: {d.bio}" for d in doctors])
         
         logger.info(f"Patient selected specialty: {specialty}")
-        return f"We have the following doctors available in {specialty}:\n\n{doctor_list}\n\nWhich doctor would you prefer to see?"
+        return f"We have the following doctors available in {specialty_obj.name}:\n\n{doctor_list}\n\nWhich doctor would you prefer to see?"
     
     @llm.ai_callable()
     async def select_doctor(self, doctor_name: str) -> str:
         """Select a doctor for the appointment"""
+        # Check if doctor_name is None or empty
+        if not doctor_name or doctor_name.strip() == "":
+            logger.warning("Doctor name is empty in select_doctor call")
+            return "I need a doctor name to proceed. Could you please specify which doctor you'd like to see?"
+            
         self.doctor_preference = doctor_name
         
         # Import here to avoid circular imports
         import database
         
-        # Find the doctor (this is a simplified approach - in reality, you'd need a more robust search)
-        # In a real system, you might use the doctor's ID instead of searching by name
-        from sqlmodel import select
-        from database import Doctor, get_session
+        # Use the new helper function for flexible doctor name matching
+        doctor = await database.find_doctor_by_name(doctor_name)
         
-        doctor_id = None
-        async with database.get_session() as session:
-            # Search for doctor by partial name match
-            result = session.exec(select(Doctor).where(
-                Doctor.name.ilike(f"%{doctor_name}%")
-            )).first()
-            
-            if result:
-                doctor_id = result.id
-        
-        if not doctor_id:
+        if not doctor:
             logger.warning(f"Doctor not found: {doctor_name}")
             return f"I'm sorry, I couldn't find '{doctor_name}' in our system. Please choose from one of our available doctors."
+        
+        doctor_id = doctor.id
         
         # Get next available slots
         next_week = datetime.now() + timedelta(days=7)  # One week from now
@@ -329,8 +331,8 @@ class ClinicMateFunctions(llm.FunctionContext):
         # Format the available slots
         slot_list = "\n".join([f"- {slot.strftime('%A, %B %d, %Y at %I:%M %p')}" for slot in available_slots])
         
-        logger.info(f"Patient selected doctor: {doctor_name}")
-        return f"{doctor_name} has the following available appointment slots:\n\n{slot_list}\n\nWhich date and time would you prefer?"
+        logger.info(f"Patient selected doctor: {doctor_name} (ID: {doctor_id})")
+        return f"{doctor.name} has the following available appointment slots:\n\n{slot_list}\n\nWhich date and time would you prefer?"
     
     @llm.ai_callable()
     async def book_appointment(self, date_time_str: str) -> str:
@@ -344,21 +346,26 @@ class ClinicMateFunctions(llm.FunctionContext):
         patient_created = False
         appointment_created = False
         
-        # Find the doctor ID (similar to select_doctor method)
+        # Check if doctor_preference is None and handle it
+        if self.doctor_preference is None:
+            logger.error(f"doctor_preference is None, cannot book appointment")
+            self.appointment_details = {
+                'doctor': {'name': 'Unknown Doctor', 'specialty': self.specialty_preference or 'Unknown Specialty'},
+                'date_time': date_time_str,
+                'status': 'pending',
+                'error': "Doctor not specified"
+            }
+            return "I need to know which doctor you'd like to see before I can book an appointment. Could you please tell me which doctor you prefer?" 
+        
+        # Find the doctor using our new helper function
+        doctor = None
         doctor_id = None
         try:
-            async with database.get_session() as session:
-                from sqlmodel import select
-                from database import Doctor
-                
-                # Search for doctor by partial name match
-                result = session.exec(select(Doctor).where(
-                    Doctor.name.ilike(f"%{self.doctor_preference}%")
-                )).first()
-                
-                if result:
-                    doctor_id = result.id
-                    doctor_found = True
+            doctor = await database.find_doctor_by_name(self.doctor_preference)
+            if doctor:
+                doctor_id = doctor.id
+                doctor_found = True
+                logger.info(f"Found doctor: {doctor.name} (ID: {doctor_id})")
         except Exception as e:
             logger.error(f"Error finding doctor: {str(e)}")
         
@@ -366,12 +373,14 @@ class ClinicMateFunctions(llm.FunctionContext):
             logger.warning(f"Doctor not found when booking: {self.doctor_preference}")
             # Create appointment_details with minimal information for fallback
             self.appointment_details = {
-                'doctor': {'name': self.doctor_preference, 'specialty': self.specialty_preference},
+                'doctor': {'name': self.doctor_preference or 'Unknown Doctor', 'specialty': self.specialty_preference or 'Unknown Specialty'},
                 'date_time': date_time_str,
                 'status': 'pending',
                 'error': "Doctor not found"
             }
-            return "I've noted your request to schedule with Dr. " + self.doctor_preference + ". There seems to be an issue with our system, but our scheduling team will contact you within 24 hours to confirm your appointment."
+            # Safe string concatenation handling None values
+            doctor_name = self.doctor_preference if self.doctor_preference is not None else "the requested doctor"
+            return f"I've noted your request to schedule with {doctor_name}. There seems to be an issue with our system, but our scheduling team will contact you within 24 hours to confirm your appointment."
         
         # Parse the date_time string
         appointment_date = None
@@ -409,8 +418,11 @@ class ClinicMateFunctions(llm.FunctionContext):
         
         if not date_parsed:
             # Create appointment_details with minimal information for fallback
+            doctor_name = doctor.name if doctor else self.doctor_preference
+            doctor_specialty = doctor.specialty.name if doctor and doctor.specialty else self.specialty_preference
+            
             self.appointment_details = {
-                'doctor': {'name': self.doctor_preference, 'specialty': self.specialty_preference},
+                'doctor': {'name': doctor_name, 'specialty': doctor_specialty},
                 'date_time': date_time_str,
                 'status': 'pending',
                 'error': f"Could not parse date: {date_time_str}"
@@ -440,18 +452,20 @@ class ClinicMateFunctions(llm.FunctionContext):
                 logger.error(f"Error creating patient for appointment: {str(e)}")
         
         # Always create appointment details, even if the database operation fails
+        doctor_name = doctor.name if doctor else self.doctor_preference
+        doctor_specialty = doctor.specialty.name if doctor and doctor.specialty else self.specialty_preference
         formatted_date = appointment_date.strftime("%A, %B %d, %Y at %I:%M %p") if appointment_date else date_time_str
         
         if not patient_created:
             # Create appointment_details with minimal information for fallback
             self.appointment_details = {
-                'doctor': {'name': self.doctor_preference, 'specialty': self.specialty_preference},
+                'doctor': {'name': doctor_name, 'specialty': doctor_specialty},
                 'date_time': formatted_date,
                 'duration_minutes': 30,
                 'status': 'pending',
                 'error': "Failed to create patient"
             }
-            return f"I've scheduled your appointment with {self.doctor_preference} for {formatted_date}. There was a small issue with our system, but your appointment request has been recorded. Our scheduling team will contact you to confirm. Would you like me to send a confirmation to your email or phone?"
+            return f"I've scheduled your appointment with {doctor_name} for {formatted_date}. There was a small issue with our system, but your appointment request has been recorded. Our scheduling team will contact you to confirm. Would you like me to send a confirmation to your email or phone?"
         
         try:
             # Try to create the appointment
@@ -475,7 +489,7 @@ class ClinicMateFunctions(llm.FunctionContext):
                     logger.warning(f"Could not retrieve appointment details for ID {appointment.id}")
                     # Create minimal appointment details
                     self.appointment_details = {
-                        'doctor': {'name': self.doctor_preference, 'specialty': self.specialty_preference},
+                        'doctor': {'name': doctor_name, 'specialty': doctor_specialty},
                         'date_time': formatted_date,
                         'duration_minutes': 30,
                         'status': 'scheduled',
@@ -484,19 +498,19 @@ class ClinicMateFunctions(llm.FunctionContext):
             else:
                 # Create minimal appointment details for fallback when slot is unavailable
                 self.appointment_details = {
-                    'doctor': {'name': self.doctor_preference, 'specialty': self.specialty_preference},
+                    'doctor': {'name': doctor_name, 'specialty': doctor_specialty},
                     'date_time': formatted_date,
                     'duration_minutes': 30,
                     'status': 'pending',
                     'error': "Time slot unavailable"
                 }
-                logger.warning(f"Failed to create appointment for {self.patient_name} with {self.doctor_preference} at {formatted_date}")
+                logger.warning(f"Failed to create appointment for {self.patient_name} with {doctor_name} at {formatted_date}")
                 return "I'm sorry, but that time slot is no longer available. Would you like to choose a different time?"
         except Exception as e:
             logger.error(f"Error during appointment booking: {str(e)}")
             # Create minimal appointment details for fallback
             self.appointment_details = {
-                'doctor': {'name': self.doctor_preference, 'specialty': self.specialty_preference},
+                'doctor': {'name': doctor_name, 'specialty': doctor_specialty},
                 'date_time': formatted_date,
                 'duration_minutes': 30,
                 'status': 'pending',
@@ -504,8 +518,13 @@ class ClinicMateFunctions(llm.FunctionContext):
             }
         
         # Format a nice confirmation message
-        doctor_name = self.appointment_details.get('doctor', {}).get('name', self.doctor_preference)
-        specialty = self.appointment_details.get('doctor', {}).get('specialty', self.specialty_preference)
+        if self.appointment_details.get('doctor', {}):
+            doctor_name = self.appointment_details['doctor'].get('name', doctor_name)
+            specialty = self.appointment_details['doctor'].get('specialty', doctor_specialty)
+        else:
+            doctor_name = doctor_name
+            specialty = doctor_specialty
+            
         formatted_date = self.appointment_details.get('date_time', formatted_date)
         status = self.appointment_details.get('status', 'scheduled')
         

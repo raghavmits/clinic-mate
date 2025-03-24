@@ -434,32 +434,51 @@ async def save_patient_from_context(fnc_ctx: ClinicMateFunctions) -> int:
                 # YYYY-MM-DD format
                 dob = datetime.strptime(dob_str, '%Y-%m-%d').date()
             except ValueError:
-                # Try descriptive format (e.g., "January 15, 1980")
-                dob = datetime.strptime(dob_str, '%B %d, %Y').date()
+                try:
+                    # Try descriptive format (e.g., "January 15, 1980")
+                    dob = datetime.strptime(dob_str, '%B %d, %Y').date()
+                except ValueError:
+                    # Try additional formats
+                    try:
+                        # Try M/D/YYYY format
+                        dob = datetime.strptime(dob_str, '%-m/%-d/%Y').date()
+                    except ValueError:
+                        # Try D-M-YYYY format
+                        dob = datetime.strptime(dob_str, '%-d-%-m-%Y').date()
     except Exception as e:
         logger.error(f"Could not parse date of birth: {dob_str}, error: {str(e)}")
         # Use a placeholder date for demonstration (should handle more gracefully in production)
         dob = datetime.now().date()
     
-    # Create new patient - simplified approach without checking for duplicates
+    # Create new patient directly without using the PatientRead model
     try:
-        new_patient = PatientCreate(
-            name=fnc_ctx.patient_name,
-            date_of_birth=dob,
-            email=fnc_ctx.email,
-            phone=fnc_ctx.phone_number,
-            address=fnc_ctx.address,
-            insurance_provider=fnc_ctx.insurance_provider,
-            insurance_id=fnc_ctx.insurance_id,
-            has_referral=fnc_ctx.has_referral,
-            referred_physician=fnc_ctx.referred_physician,
-            medical_complaint=fnc_ctx.medical_complaint
-        )
-        
-        patient = await add_patient(new_patient)
-        patient_id = patient.id
-        logger.info(f"Created new patient with ID: {patient_id}")
-        return patient_id
+        async with get_session() as session:
+            # Create a new Patient record directly 
+            new_patient = Patient(
+                name=fnc_ctx.patient_name,
+                date_of_birth=dob,
+                email=fnc_ctx.email,
+                phone=fnc_ctx.phone_number,
+                address=fnc_ctx.address,
+                insurance_provider=fnc_ctx.insurance_provider,
+                insurance_id=fnc_ctx.insurance_id,
+                has_referral=fnc_ctx.has_referral,
+                referred_physician=fnc_ctx.referred_physician,
+                medical_complaint=fnc_ctx.medical_complaint,
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            )
+            
+            # Add to session and commit
+            session.add(new_patient)
+            session.commit()
+            session.refresh(new_patient)
+            
+            # Get the ID directly
+            patient_id = new_patient.id
+            
+            logger.info(f"Created new patient with ID: {patient_id}")
+            return patient_id
     except Exception as e:
         logger.error(f"Error creating patient: {str(e)}")
         return None
@@ -1047,4 +1066,167 @@ async def add_appointment(
             return app_read
         except Exception as e:
             logger.error(f"Error adding appointment: {str(e)}")
-            return None 
+            return None
+
+
+async def find_doctor_by_name(doctor_name: str) -> Optional[DoctorRead]:
+    """
+    Find a doctor by name with flexible matching (includes partial matches and titles)
+    
+    Args:
+        doctor_name: The name of the doctor to find (can include "Dr." prefix)
+        
+    Returns:
+        The found doctor or None if not found
+    """
+    # Handle None values or empty strings
+    if doctor_name is None or doctor_name.strip() == "":
+        logger.error("Cannot search for doctor with empty name")
+        return None
+        
+    try:
+        async with get_session() as session:
+            # Strip "Dr. " prefix if present for better matching
+            search_name = doctor_name.replace("Dr.", "").strip()
+            
+            # Try exact match first (case insensitive)
+            result = session.exec(select(Doctor).where(
+                Doctor.name.ilike(f"%{search_name}%")
+            )).first()
+            
+            if result:
+                logger.info(f"Found doctor by name: {result.name}")
+                
+                # Get the specialty for the doctor
+                specialty = session.get(Specialty, result.specialty_id)
+                
+                # Create the DoctorRead object
+                doctor_read = DoctorRead(
+                    id=result.id,
+                    name=result.name, 
+                    specialty_id=result.specialty_id,
+                    bio=result.bio,
+                    specialty=SpecialtyRead(
+                        id=specialty.id,
+                        name=specialty.name,
+                        description=specialty.description
+                    ) if specialty else None
+                )
+                return doctor_read
+            
+            # If no exact match, try matching on first name or last name
+            # This is helpful when the user only provides partial information
+            all_doctors = session.exec(select(Doctor)).all()
+            
+            for doctor in all_doctors:
+                # Extract first and last name
+                name_parts = doctor.name.split()
+                
+                # Try to match on first name or last name
+                for part in name_parts:
+                    if part.lower() in search_name.lower() or search_name.lower() in part.lower():
+                        logger.info(f"Found doctor by partial name match: {doctor.name}")
+                        
+                        # Get the specialty for the doctor
+                        specialty = session.get(Specialty, doctor.specialty_id)
+                        
+                        doctor_read = DoctorRead(
+                            id=doctor.id,
+                            name=doctor.name, 
+                            specialty_id=doctor.specialty_id,
+                            bio=doctor.bio,
+                            specialty=SpecialtyRead(
+                                id=specialty.id,
+                                name=specialty.name,
+                                description=specialty.description
+                            ) if specialty else None
+                        )
+                        return doctor_read
+            
+            logger.warning(f"Doctor not found with name: {doctor_name}")
+            return None
+    except Exception as e:
+        logger.error(f"Error finding doctor by name: {str(e)}")
+        return None
+
+async def find_specialty_by_name(specialty_name: str) -> Optional[SpecialtyRead]:
+    """
+    Find a specialty by name with flexible matching
+    
+    Args:
+        specialty_name: The name of the specialty to find (can include parentheses)
+        
+    Returns:
+        The found specialty or None if not found
+    """
+    # Handle None values or empty strings
+    if specialty_name is None or specialty_name.strip() == "":
+        logger.error("Cannot search for specialty with empty name")
+        return None
+        
+    try:
+        # Clean up the specialty name for better matching
+        # Remove parentheses and common abbreviations
+        clean_name = specialty_name.replace("(", "").replace(")", "").strip()
+        
+        # Handle common specialty abbreviations and alternative names
+        specialty_mappings = {
+            "ENT": "Otolaryngology",
+            "Eye": "Ophthalmology",
+            "Heart": "Cardiology",
+            "Cardiac": "Cardiology",
+            "Skin": "Dermatology",
+            "Bone": "Orthopedics",
+            "Joint": "Orthopedics",
+            "Ortho": "Orthopedics",
+            "Lung": "Pulmonology",
+            "Respiratory": "Pulmonology",
+            "Breathing": "Pulmonology",
+            "Digestive": "Gastroenterology",
+            "Stomach": "Gastroenterology",
+            "GI": "Gastroenterology",
+            "Brain": "Neurology",
+            "Nerve": "Neurology",
+            "Neuro": "Neurology"
+        }
+        
+        async with get_session() as session:
+            # First try exact match (case insensitive)
+            result = session.exec(select(Specialty).where(
+                Specialty.name.ilike(f"%{clean_name}%")
+            )).first()
+            
+            if result:
+                logger.info(f"Found specialty by name: {result.name}")
+                return SpecialtyRead(id=result.id, name=result.name, description=result.description)
+            
+            # Next, try matching based on known mappings
+            for key, value in specialty_mappings.items():
+                if key.lower() in clean_name.lower():
+                    # Look for the mapped specialty
+                    mapped_result = session.exec(select(Specialty).where(
+                        Specialty.name.ilike(f"%{value}%")
+                    )).first()
+                    
+                    if mapped_result:
+                        logger.info(f"Found specialty by mapping {key} to {mapped_result.name}")
+                        return SpecialtyRead(id=mapped_result.id, name=mapped_result.name, description=mapped_result.description)
+            
+            # If still not found, try with all specialties
+            all_specialties = session.exec(select(Specialty)).all()
+            
+            # Check if any word in the specialty name matches any word in the database specialties
+            for specialty in all_specialties:
+                specialty_words = specialty.name.lower().split()
+                search_words = clean_name.lower().split()
+                
+                # Check for any word overlap
+                if any(word in specialty_words for word in search_words) or any(word in search_words for word in specialty_words):
+                    logger.info(f"Found specialty by word match: {specialty.name}")
+                    return SpecialtyRead(id=specialty.id, name=specialty.name, description=specialty.description)
+            
+            logger.warning(f"Specialty not found with name: {specialty_name}")
+            return None
+    except Exception as e:
+        logger.error(f"Error finding specialty by name: {str(e)}")
+        return None 
